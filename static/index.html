@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <title>HTTP Speed Test</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            :root {
+                display: flex;
+                flex-direction: column;
+                min-block-size: 100%;
+                align-items: center;
+                background-color: #0c2429;
+                color: #a1e6f7;
+                user-select: none !important;
+            }
+            body {
+                display: flex;
+                flex-direction: column;
+                flex: 1;
+                font-family: system-ui, sans-serif;
+                text-align: center;
+                inline-size: 100%;
+                max-inline-size: 40rem;
+                margin: 0;
+            }
+            #heading {
+                font-size: 200%;
+                font-weight: bold;
+                margin: 0;
+                padding-block: 1rem;
+                padding-inline: 1rem;
+            }
+            #meter {
+                flex: 1;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                grid-template-rows: max-content 1fr;
+            }
+            #meter > div {
+                border-block-end: solid 0.125rem #3c808e;
+            }
+            #meter > :is(#meter-down-num-container, #meter-up-num-container) {
+                padding-block: 1rem;
+                display: flex;
+                flex-direction: column;
+                padding-inline-end: 16.67%;
+                text-align: end;
+            }
+            #meter > :is(#meter-down-num-container, #meter-up-num-container) .label {
+                font-weight: bold;
+            }
+            #meter-down-num, #meter-up-num {
+                font-size: 250%;
+                font-weight: normal;
+            }
+            #meter-down-bar-container, #meter-up-bar-container {
+                display: flex;
+                flex-direction: row;
+                justify-content: center;
+            }
+            #meter-down-bar-container {
+                align-items: start;
+            }
+            #meter-up-bar-container {
+                align-items: end;
+            }
+            #meter-down-bar, #meter-up-bar {
+                block-size: 0%;
+                inline-size: 33%;
+                box-sizing: border-box;
+                transition: all ease-in-out .5s;
+            }
+            #meter-down-bar {
+                background: linear-gradient(to bottom, #3c808e80, #a1e6f7ff);
+                border-block-end: solid 0.125rem #a1e6f7ff;
+            }
+            #meter-up-bar {
+                background: linear-gradient(to top, #3c808e80, #a1e6f7ff);
+                border-block-start: solid 0.125rem #a1e6f7ff;
+            }
+            #controls {
+                padding-block: 1rem;
+            }
+            button#start-test {
+                appearance: none;
+                border: solid 0.125rem #a1e6f7;
+                background-color: rgba(255, 255, 255, 0.1);
+                border-radius: 1rem;
+                font: inherit;
+                font-size: 150%;
+                padding-block: .75rem;
+                padding-inline: 1.5rem;
+                color: inherit;
+            }
+            button#start-test:focus {
+                border-color: #ffffff;
+            }
+            button#start-test:active {
+                background-color: rgba(255, 255, 255, 0.25);
+            }
+            button:disabled {
+                opacity: 0.5;
+            }
+        </style>
+    </head>
+    <body>
+        <h1 id="heading">HTTP Speed Test</h1>
+        <div id="meter">
+            <div id="meter-down-num-container">
+                <div class="label">DOWN</div>
+                <div id="meter-down-num">0</div>
+                <div id="meter-down-num-unit">Mbps</div>
+            </div>
+            <div id="meter-up-num-container">
+                <div class="label">UP</div>
+                <div id="meter-up-num">0</div>
+                <div id="meter-up-num-unit">Mbps</div>
+            </div>
+            <div id="meter-down-bar-container">
+                <div id="meter-down-bar"></div>
+            </div>
+            <div id="meter-up-bar-container">
+                <div id="meter-up-bar"></div>
+            </div>
+        </div>
+        <div id="controls">
+            <button id="start-test">Start</button>
+        </div>
+        <script>
+            async function upload(byteLength) {
+                const totalBytes = byteLength >>> 0;
+                if (totalBytes == 0) {
+                    return;
+                }
+                if (totalBytes > 1024 * 1024 * 1024) {
+                    throw new Error('Too large upload');
+                }
+                const buffer = new ArrayBuffer(totalBytes);
+                const startTime = performance.now();
+                const res = await fetch('/upload', {
+                    method: 'POST',
+                    body: buffer,
+                    mode: 'same-origin',
+                    priority: 'high',
+                    credentials: 'omit',
+                    cache: 'no-store',
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                    },
+                    duplex: 'half',
+                });
+                const json = await res.json();
+                const endTime = performance.now();
+                if (json.uploaded_bytes != totalBytes) {
+                    throw new Error('Uploaded bytes does not match');
+                }
+                const time = endTime - startTime;
+                const speed = Math.trunc(totalBytes * 8 / time * 1000);
+                return {
+                    type: 'upload',
+                    transferredBytes: totalBytes,
+                    speed,
+                    time,
+                    httpVersion: res.headers.get('x-http-version') || 'unknown',
+                };
+            }
+
+            async function download(byteLength) {
+                const totalBytes = byteLength >>> 0;
+                if (totalBytes == 0) {
+                    return;
+                }
+                if (totalBytes > 1024 * 1024 * 1024) {
+                    throw new Error('Too large download');
+                }
+                const startTime = performance.now();
+                const res = await fetch(`/download/${totalBytes}`, {
+                    method: 'GET',
+                    cache: 'no-store',
+                    mode: 'same-origin',
+                    priority: 'high',
+                    credentials: 'omit',
+                });
+                const reader = res.body.getReader();
+                let readBytes = 0;
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (value) {
+                        readBytes += value.byteLength;
+                    }
+                    if (done) {
+                        break;
+                    }
+                }
+                if (readBytes != totalBytes) {
+                    throw new Error('Downloaded bytes does not match');
+                }
+                const endTime = performance.now();
+                const time = endTime - startTime;
+                const speed = Math.trunc(totalBytes * 8 / time * 1000);
+                return {
+                    type: 'download',
+                    transferredBytes: totalBytes,
+                    speed,
+                    time,
+                    httpVersion: res.headers.get('x-http-version') || 'unknown',
+                };
+            }
+
+            function formatNumber(n) {
+                const number = Number(n);
+                if (number > 1_000_000_000) {
+                    return (number / 1_000_000_000).toFixed(2) + ' G';
+                } else if (number > 1_000_000) {
+                    return (number / 1_000_000).toFixed(2) + ' M';
+                } else if (number > 1_000) {
+                    return (number / 1_000).toFixed(2) + ' k';
+                } else {
+                    return String(number) + ' ';
+                }
+            }
+
+            const CHUNK_SIZES = Object.freeze([1024 * 1024, 1024 * 1024 * 4, 1024 * 1024 * 16, 1024 * 1024 * 64, 1024 * 1024 * 256, 1024 * 1024 * 1024]);
+
+            class HttpSpeedTest {
+                #callback;
+                #data = {
+                    downloadFinished: false,
+                    uploadFinished: false,
+                    testFinished: false,
+
+                    httpVersion: 'unknown',
+
+                    downloadTransferredBytes: 0,
+                    downloadSpeedBits: 0,
+
+                    uploadTransferredBytes: 0,
+                    uploadSpeedBits: 0,
+                };
+
+                constructor(callback) {
+                    if ('function' != typeof callback) {
+                        callback = (data) => {
+                            const downSpeed = formatNumber(data.downloadSpeedBits);
+                            const downBytes = formatNumber(data.downloadTransferredBytes);
+                            const upSpeed = formatNumber(data.uploadSpeedBits);
+                            const upBytes = formatNumber(data.uploadTransferredBytes);
+                            if (data.testFinished) {
+                                console.info(`Test finished: Download ${downSpeed}bps / ${downBytes}B transferred, Upload ${upSpeed}bps / ${upBytes}B transferred`);
+                            } else {
+                                console.log(`Testing...... Download ${downSpeed}bps / ${downBytes}B transferred, Upload ${upSpeed}bps / ${upBytes}B transferred`);
+                            }
+                        };
+                    }
+                    this.#callback = callback;
+                }
+
+                #dispatch() {
+                    this.#callback(this.#data);
+                }
+
+                #setDownloadProgress(speedBits, totalTransferredBytes, httpVersion) {
+                    this.#data.downloadSpeedBits = speedBits;
+                    this.#data.downloadTransferredBytes = totalTransferredBytes;
+                    this.#data.httpVersion = httpVersion;
+                    this.#dispatch();
+                }
+
+                #downloadFinished() {
+                    this.#data.downloadFinished = true;
+                    if (this.#data.uploadFinished) {
+                        this.#data.testFinished = true;
+                    }
+                    this.#dispatch();
+                }
+
+                #setUploadProgress(speedBits, totalTransferredBytes, httpVersion) {   
+                    this.#data.uploadSpeedBits = speedBits;
+                    this.#data.uploadTransferredBytes = totalTransferredBytes;
+                    this.#data.httpVersion = httpVersion;
+                    this.#dispatch();
+                }
+
+                #uploadFinished() {
+                    this.#data.uploadFinished = true;
+                    if (this.#data.downloadFinished) {
+                        this.#data.testFinished = true;
+                    }
+                    this.#dispatch();
+                }
+
+                async #test_upload() {
+                    const results = [];
+                    const final = {
+                        totalTransferredBytes: 0,
+                        speed: 0,
+                        httpVersion: 'unknown',
+                    };
+
+                    for (const chunkSize of CHUNK_SIZES) {
+                        const result = await upload(chunkSize);
+                        results.push(result);
+                        final.totalTransferredBytes += result.transferredBytes;
+                        final.httpVersion = result.httpVersion;
+                        final.speed = result.speed;
+
+                        this.#setUploadProgress(result.speed, final.totalTransferredBytes, result.httpVersion);
+
+                        if (result.time > 4000) {
+                            break;
+                        }
+                    }
+
+                    this.#uploadFinished();
+                    return final;
+                }
+
+                async #test_download() {
+                    const results = [];
+                    const final = {
+                        totalTransferredBytes: 0,
+                        speed: 0,
+                        httpVersion: 'unknown',
+                    };
+
+                    for (const chunkSize of CHUNK_SIZES) {
+                        const result = await download(chunkSize);
+                        results.push(result);
+                        final.totalTransferredBytes += result.transferredBytes;
+                        final.httpVersion = result.httpVersion;
+                        final.speed = result.speed;
+
+                        this.#setDownloadProgress(result.speed, final.totalTransferredBytes, result.httpVersion);
+
+                        if (result.time > 4000) {
+                            break;
+                        }
+                    }
+
+                    this.#downloadFinished();
+                    return final;
+                }
+
+                async startTest() {
+                    await this.#test_download();
+                    await this.#test_upload();
+                }
+            }
+
+            const meterDownNum = document.querySelector('#meter-down-num');
+            const meterUpNum = document.querySelector('#meter-up-num');
+
+            const meterDownNumUnit = document.querySelector('#meter-down-num-unit');
+            const meterUpNumUnit = document.querySelector('#meter-up-num-unit');
+
+            const meterDownBar = document.querySelector('#meter-down-bar');
+            const meterUpBar = document.querySelector('#meter-up-bar');
+
+            const startTestButton = document.querySelector('#start-test');
+            startTestButton.addEventListener('click', () => {
+                startTestButton.disabled = true;
+                const test = new HttpSpeedTest((data) => {
+                    const downSpeed = formatNumber(data.downloadSpeedBits) + 'bps';
+                    const upSpeed = formatNumber(data.uploadSpeedBits) + 'bps';
+                    const downPercent = Math.min(100, Math.max(0, Math.sqrt(Math.max(100000, data.downloadSpeedBits) / 100000)));
+                    const upPercent = Math.min(100, Math.max(0, Math.sqrt(Math.max(100000, data.uploadSpeedBits) / 100000)));
+
+                    const [downSpeedNum, downSpeedUnit] = downSpeed.split(' ');
+                    const [upSpeedNum, upSpeedUnit] = upSpeed.split(' ');
+
+                    meterDownNum.textContent = downSpeedNum;
+                    if (data.downloadSpeedBits > 0) {
+                        meterDownNumUnit.textContent = downSpeedUnit;
+                        if (data.downloadFinished) {
+                            meterDownNum.style.opacity = '1';
+                        } else {
+                            meterDownNum.style.opacity = '0.67';
+                        }
+                    } else {
+                        meterDownNumUnit.textContent = 'Mbps';
+                        meterDownNum.style.opacity = '0.33';
+                    }
+
+                    meterUpNum.textContent = upSpeedNum;
+                    if (data.uploadSpeedBits > 0) {
+                        meterUpNumUnit.textContent = upSpeedUnit;
+                        if (data.uploadFinished) {
+                            meterUpNum.style.opacity = '1';
+                        } else {
+                            meterUpNum.style.opacity = '0.67';
+                        }
+                    } else {
+                        meterUpNumUnit.textContent = 'Mbps';
+                        meterUpNum.style.opacity = '0.33';
+                    }
+
+                    meterDownBar.style.blockSize = `${downPercent}%`;
+                    meterUpBar.style.blockSize = `${upPercent}%`;
+
+                    if (data.testFinished) {
+                        startTestButton.disabled = false;
+                    }
+                });
+                
+                test.startTest().catch((e) => {
+                    console.error(e);
+                    startTestButton.disabled = false;
+                });
+            })
+        </script>
+    </body>
+</html>
