@@ -18,7 +18,7 @@ log = "0.4"
 threadpool = "1.8"
 parking_lot = "0.12"
 futures-util = "0.3"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 x509-parser = "0.16"
 serde_json = "1.0"
 http-body = "1.0"
