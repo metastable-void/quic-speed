@@ -9,22 +9,26 @@ use deps::log;
 use deps::http_body_util;
 use deps::serde_json;
 use deps::futures;
-use deps::http_body;
+
+use std::ops::Deref;
 
 use hyper::body::Bytes;
 use hyper::body::Frame;
+use hyper::Version;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper::{Method, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use http_body_util::{combinators::BoxBody, BodyExt, Full, Empty};
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
+use hyper_util::server::conn::auto::Builder;
 
 use deps::parking_lot::RwLock;
 use std::sync::Arc;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
+use tokio_rustls::TlsAcceptor;
 
 use std::net::TcpListener;
 
@@ -181,6 +185,7 @@ impl PlainHttpServer {
         }
     }
 
+    /// start the server in background.
     pub fn start(self) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -192,3 +197,67 @@ impl PlainHttpServer {
     }
 }
 
+pub struct TlsHttpServer {
+    listener: TcpListener,
+    tls_acceptor: Arc<RwLock<TlsAcceptor>>,
+}
+
+impl TlsHttpServer {
+    pub fn new(acceptor: Arc<RwLock<TlsAcceptor>>, port: u16, bind_device: Option<&[u8]>) -> Result<Self, std::io::Error> {
+        let listener = tcp::listen(port, None, bind_device)?;
+        Ok(Self { listener, tls_acceptor: acceptor })
+    }
+
+
+    async fn run(&self) {
+        let listener = tokio::net::TcpListener::from_std(self.listener.try_clone().unwrap()).unwrap();
+        loop {
+            let stream = if let Ok((stream, _)) = listener.accept().await {
+                stream
+            } else {
+                continue;
+            };
+
+            let acceptor = self.tls_acceptor.clone();
+            tokio::task::spawn(async move {
+                let tls_acceptor = {
+                    let read = acceptor.read();
+                    let acceptor = read.deref().clone();
+                    acceptor
+                };
+                
+                let tls_stream = match tls_acceptor.accept(stream).await {
+                    Ok(tls_stream) => tls_stream,
+                    Err(err) => {
+                        log::error!("failed to perform tls handshake: {err:#}");
+                        return;
+                    }
+                };
+                let service = service_fn(|req: _| {
+                    let http_version = match req.version() {
+                        Version::HTTP_2 => HttpVersion::Http2,
+                        _ => HttpVersion::Http1
+                    };
+                    handle_request(req, http_version)
+                });
+                if let Err(err) = Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(tls_stream), service)
+                    .await
+                {
+                    log::error!("failed to serve connection: {err:#}");
+                }
+            });
+        }
+    }
+
+    /// start the server in background.
+    pub fn start(self) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(self.run());
+        })
+    }
+}

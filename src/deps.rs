@@ -16,6 +16,7 @@ pub use x509_parser;
 pub use serde_json;
 pub use http_body;
 pub use socket2;
+pub use rustls_pemfile;
 
 #[cfg(feature = "config")]
 pub use serde;

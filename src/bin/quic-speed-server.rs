@@ -29,6 +29,8 @@ mod inner {
     use clap::Parser;
     use syslog::{Facility, Formatter3164, BasicLogger};
     use log::{SetLoggerError, LevelFilter, info, error, warn};
+    use std::sync::Arc;
+    use parking_lot::RwLock;
 
     #[derive(Parser, Debug, Clone)]
     #[command(version, about, long_about = None)]  
@@ -78,7 +80,7 @@ mod inner {
             return;
         }
 
-        let mut sigs = vec![SIGHUP];
+        let sigs = vec![SIGHUP];
         let mut signals = if let Ok(signals) = Signals::new(&sigs) {
             signals
         } else {
@@ -96,6 +98,15 @@ mod inner {
                 return;
             }
         };
+
+        let tls_acceptor = match config.tls_acceptor() {
+            Ok(acceptor) => acceptor,
+            Err(e) => {
+                eprintln!("Error loading keys: {:?}", e);
+                return;
+            }
+        };
+        let tls_acceptor = Arc::new(RwLock::new(tls_acceptor));
         info!("Config loaded");
 
         let plain_http = if let Ok(server) = server::PlainHttpServer::new(80, args.bind_device.as_deref().map(|s| s.as_bytes())) {
@@ -104,8 +115,15 @@ mod inner {
             eprintln!("Failed to initialize plain http server");
             return;
         };
-        plain_http.start();
 
+        let tls_http = if let Ok(server) = server::TlsHttpServer::new(tls_acceptor.clone(), 443, args.bind_device.as_deref().map(|s| s.as_bytes())) {
+            server
+        } else {
+            eprintln!("Failed to initialize TLS http server");
+            return;
+        };
+
+        let tls_acceptor_clone = tls_acceptor.clone();
         std::thread::spawn(move || {
             for sig in signals.forever() {
                 info!("Received signal: {:?}", sig);
@@ -114,6 +132,17 @@ mod inner {
                         info!("Reloading config");
                         match Config::load(&args.config) {
                             Ok(config) => {
+                                let tls_acceptor = match config.tls_acceptor() {
+                                    Ok(acceptor) => acceptor,
+                                    Err(e) => {
+                                        eprintln!("Error loading keys: {:?}", e);
+                                        continue;
+                                    }
+                                };
+                                {
+                                    let mut w = tls_acceptor_clone.write();
+                                    *w = tls_acceptor;
+                                }
                                 info!("Config reloaded");
                             },
                             Err(e) => {
@@ -127,6 +156,9 @@ mod inner {
                 }
             }
         });
+
+        plain_http.start();
+        tls_http.start();
 
         loop {
             std::thread::park();
